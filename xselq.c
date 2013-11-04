@@ -7,7 +7,6 @@
 
 #define XCB_EVENT_RESPONSE_TYPE_MASK   (0x7f) /* see xcb_event.h */
 #define EV_TYPE(e)     (e->response_type & XCB_EVENT_RESPONSE_TYPE_MASK)
-#define ERR(...) {fprintf(stderr, __VA_ARGS__); return;}
 #define COLWIDTH 12
 #define SECTION(s) printf("%-*s", COLWIDTH, s ":")
 
@@ -24,7 +23,7 @@ typedef struct {
 } XSelectionOwnerInfo;
 
 typedef struct {
-  char *name;
+  const char *name;
   xcb_atom_t atom;
   XSelectionOwnerInfo *owner;
 } XSelectionInfo;
@@ -36,27 +35,25 @@ void free_selection_info(XSelectionInfo*);
 void free_selection_owner_info(XSelectionOwnerInfo*);
 void free_selection_target_info(XSelectionTargetInfo*);
 int init_x();
-int _main(int, char*[]);
+int _main(int, const char*[]);
 int is_targets_response(xcb_generic_event_t*, xcb_atom_t);
-char *get_atom_name(xcb_atom_t);
 char *get_window_name(xcb_window_t);
-xcb_atom_t str2atom(char*);
+xcb_atom_t str2atom(const char*);
 char *atom2str(xcb_atom_t);
 int get_window_property(xcb_window_t, xcb_atom_t, xcb_atom_t, void**);
 int request_targets(xcb_atom_t, xcb_window_t);
 XSelectionTargetInfo *get_targets(xcb_atom_t, xcb_window_t);
 XSelectionOwnerInfo *get_selection_owner_info(xcb_atom_t);
-XSelectionInfo *get_selection_info(char*);
+XSelectionInfo *get_selection_info(const char*);
 xcb_window_t get_selection_owner_window(xcb_atom_t);
 
 xcb_connection_t *X = NULL;
 xcb_window_t win;
+const char *progname;
 
 int init_x() {
-  if (!(X = xcb_connect(NULL, NULL))) {
-    fprintf(stderr, "fatal: can't connect to X server.\n");
+  if (!(X = xcb_connect(NULL, NULL)))
     return 0;
-  }
 
   xcb_screen_t *screen = xcb_setup_roots_iterator(xcb_get_setup(X)).data;
   win = xcb_generate_id(X);
@@ -68,12 +65,16 @@ int init_x() {
   return 1;
 }
 
-int _main(int argc, char *argv[]) {
-  if (argc == 0)
-    return _main(3, (char*[]) {"PRIMARY", "SECONDARY", "CLIPBOARD"});
+int _main(int argc, const char *argv[]) {
+  static const char *defaults[] = {"PRIMARY", "SECONDARY", "CLIPBOARD"};
 
-  if (!init_x())
+  if (argc == 0)
+    return _main(3, defaults);
+
+  if (!init_x()) {
+    fprintf(stderr, "%s: fatal: can't connect to X server.\n", progname);
     return EXIT_FAILURE;
+  }
 
   XSelectionInfo *sel;
   for (int i=0; i<argc;) {
@@ -86,7 +87,8 @@ int _main(int argc, char *argv[]) {
   return EXIT_SUCCESS;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, const char *argv[]) {
+  progname = argv[0];
   return _main(argc - 1, argv + 1);
 }
 
@@ -112,7 +114,7 @@ void show_selection_target_info(XSelectionTargetInfo *target) {
   puts("");
 }
 
-XSelectionInfo *get_selection_info(char *name) {
+XSelectionInfo *get_selection_info(const char *name) {
   XSelectionInfo *sel = malloc(sizeof(XSelectionInfo));
   sel->name = name;
   sel->atom = str2atom(name);
@@ -122,12 +124,11 @@ XSelectionInfo *get_selection_info(char *name) {
 
 XSelectionOwnerInfo *get_selection_owner_info(xcb_atom_t sel) {
   xcb_window_t owner_window = get_selection_owner_window(sel);
-
   if (!owner_window) return NULL;
 
   XSelectionOwnerInfo *owner = malloc(sizeof(XSelectionOwnerInfo));
-  owner->window = owner_window;
-  owner->name = get_window_name(owner_window);
+  owner->window  = owner_window;
+  owner->name    = get_window_name(owner_window);
   owner->targets = get_targets(sel, owner_window);
   return owner;
 }
@@ -136,9 +137,9 @@ XSelectionTargetInfo *get_targets(xcb_atom_t sel, xcb_window_t owner) {
   if (!request_targets(sel, owner)) return NULL;
 
   xcb_atom_t *targets;
+  XSelectionTargetInfo *ret = NULL, *tmp;
   int bytes = get_window_property(win, sel, XCB_ATOM_ATOM, (void**) &targets),
       len = bytes / sizeof(xcb_atom_t);
-  XSelectionTargetInfo *ret = NULL, *tmp;
 
   for (int i=len-1; i>=0; i--) {
     tmp = malloc(sizeof(XSelectionTargetInfo));
@@ -154,18 +155,20 @@ XSelectionTargetInfo *get_targets(xcb_atom_t sel, xcb_window_t owner) {
 }
 
 int request_targets(xcb_atom_t sel, xcb_window_t owner) {
-  int tries = 5;
-  long interval = 100000000;
-  struct timespec ts = { 0, interval };
-  xcb_generic_event_t *ev;
-
   xcb_convert_selection(X, win, sel, str2atom("TARGETS"),
       sel, XCB_CURRENT_TIME);
   xcb_flush(X);
 
+  int tries = 5, resp = 0;
+  struct timespec ts = { 0, 100000000 };
+  xcb_generic_event_t *ev;
+
   for (int i=0; i<tries; i++) {
-    if ((ev = xcb_poll_for_event(X)) &&
-        is_targets_response(ev, sel)) return 1;
+    if ((ev = xcb_poll_for_event(X))) {
+      resp = is_targets_response(ev, sel);
+      free(ev);
+      if (resp) return 1;
+    }
     nanosleep(&ts, NULL);
   }
 
@@ -173,7 +176,7 @@ int request_targets(xcb_atom_t sel, xcb_window_t owner) {
 }
 
 int is_targets_response(xcb_generic_event_t *gev, xcb_atom_t sel) {
-  if (!(EV_TYPE(gev) == XCB_SELECTION_NOTIFY)) return 0;
+  if (EV_TYPE(gev) != XCB_SELECTION_NOTIFY) return 0;
   xcb_selection_notify_event_t *ev = (xcb_selection_notify_event_t*) gev;
   return ev->property == sel && ev->target == str2atom("TARGETS");
 }
@@ -214,7 +217,7 @@ char *atom2str(xcb_atom_t a) {
   return ret;
 }
 
-xcb_atom_t str2atom(char *str) {
+xcb_atom_t str2atom(const char *str) {
   xcb_atom_t ret = XCB_NONE;
   xcb_intern_atom_reply_t *reply = xcb_intern_atom_reply(X,
       xcb_intern_atom(X, 0, strlen(str), str), NULL);
