@@ -97,6 +97,7 @@ void print_targets_info(xcb_atom_t sel) {
       free(data);
     }
     free(targets);
+    xcb_delete_property(X, win, sel);
   }
 
   free(ev);
